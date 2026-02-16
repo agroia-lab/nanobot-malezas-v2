@@ -7,6 +7,25 @@ from pathlib import Path
 import select
 import sys
 
+
+def _load_dotenv() -> None:
+    """Load .env file from cwd if present (no dependency needed)."""
+    env_path = Path.cwd() / ".env"
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
@@ -292,13 +311,24 @@ def _make_provider(config: Config):
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
         return OpenAICodexProvider(default_model=model)
 
-    if not model.startswith("bedrock/") and not (p and p.api_key):
+    # Resolve API key: config file first, then env var fallback
+    from nanobot.providers.registry import find_by_model, find_by_name
+    api_key = (p.api_key if p else None) or ""
+    if not api_key:
+        # Try to detect provider from model name and check env var
+        spec = (find_by_name(provider_name) if provider_name else None) or find_by_model(model)
+        if spec and spec.env_key:
+            api_key = os.environ.get(spec.env_key, "")
+            if not provider_name:
+                provider_name = spec.name
+
+    if not model.startswith("bedrock/") and not api_key:
         console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nanobot/config.json under providers section")
+        console.print("Set one in ~/.nanobot/config.json, .env file, or environment variable")
         raise typer.Exit(1)
 
     return LiteLLMProvider(
-        api_key=p.api_key if p else None,
+        api_key=api_key or (p.api_key if p else None),
         api_base=config.get_api_base(model),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
